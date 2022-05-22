@@ -8,7 +8,7 @@
 # https://github.com/vladtcvs/ArduinoWeatherStation
 #
 # by wrybread@gmail.com
-#
+# by vtcendrovskii@gmail.com
 #
 #
 
@@ -18,7 +18,7 @@
 
 See here for more info:
 
-https://github.com/vladtcvs/ArduinoWeatherStation
+https://github.com/vladtcvs/aws
 
 """
 
@@ -31,7 +31,7 @@ import json
 import weewx.drivers
 
 DRIVER_NAME = 'AWS'
-DRIVER_VERSION = '0.2'
+DRIVER_VERSION = '0.3'
 
 def loader(config_dict, _):
     return AWSDriver(**config_dict[DRIVER_NAME])
@@ -58,6 +58,112 @@ def loginf(msg):
 def logerr(msg):
     logmsg(syslog.LOG_ERR, msg)
 
+class AWSDevice(object):
+    def __init__(self, port, id):
+        self.port = port
+        self.id = "%02d" % (int(id))
+
+    def probe(self, nattempts = 1):
+        cmd = "%s probe\n" % self.id
+        for _ in range(nattempts):
+            self.port.write(bytes(cmd, 'utf8'))
+            resp = self.port.readline()
+            if resp is None:
+                continue
+            resp = resp.decode('utf8').strip()
+            if resp == ("%s response probe" % self.id):
+                return True
+        return False
+
+    def reset(self):
+        cmd = "%s reset\n" % self.id
+        self.port.write(bytes(cmd, 'utf8'))
+        time.sleep(20)
+        return self.probe()
+
+    def parse(self, response):
+        response = response.strip()
+        kvs = response.split()
+        data = {}
+        for sub in kvs:
+            kv = sub.split(":")
+            if len(kv) != 2:
+                continue
+            key = kv[0].strip()
+            val = float(kv[1].strip())
+            data[key] = val
+        return data
+
+    def measure(self, nattempts=1):
+        cmd = "%s measure\n" % self.id
+        rh = "%s response measure" % self.id
+        for _ in range(nattempts):
+            self.port.write(bytes(cmd, 'utf8'))
+            resp = self.port.readline()
+            if resp is None:
+                continue
+            resp = resp.decode('utf8').strip()
+            if resp.startswith(rh):
+                resp = resp[len(rh):].strip()
+                return self.parse(resp)
+        return None
+
+class AWSDeviceManager(object):
+    def __init__(self, port_names, device_ids, baud, timeout):
+        self.port_names = port_names
+        self.ids = device_ids
+        self.devices = []
+        self.ports = []
+        self.timeout = timeout
+        self.baud = baud
+
+    def open_ports(self):
+        for port_name in self.port_names:
+            loginf('opening port %s' % port_name)
+            port = serial.Serial(port_name, self.baud, timeout=self.timeout)
+            port.flush()
+            self.ports.append(port)
+        time.sleep(20)
+        loginf('all ports opened')
+
+    def populate(self):
+        for port in self.ports:
+            for id in self.ids:
+                device = AWSDevice(port, id)
+                if device.probe():
+                    loginf('Found device id = %s' % id)
+                    self.devices.append({"id" : id, "device" : device})
+
+    def measure(self, nattempts=1):
+        responses = {}
+        for dev in self.devices:
+            id = dev["id"]
+            device = dev["device"]
+            res = device.measure(nattempts)
+            if res is not None:
+                responses[id] = res
+        return responses
+
+class SubstitutionManager(object):
+    def __init__(self):
+        self.tables = {}
+    
+    def add(self, id, original, target):
+        if id not in self.tables:
+            self.tables[id] = {}
+        self.tables[id][original] = target
+
+    def substitute(self, id, measurement):
+        if id not in self.tables:
+            return measurement
+        subm = {}
+        for key in measurement:
+            if key not in self.tables[id]:
+                subm[key] = measurement[key]
+            else:
+                subm[self.tables[id][key]] = measurement[key]
+        return subm
+
 class AWSDriver(weewx.drivers.AbstractDevice):
     """weewx driver that communicates with an Arduino weather station
     
@@ -74,14 +180,33 @@ class AWSDriver(weewx.drivers.AbstractDevice):
     [Optional. Default is 10]
     """
     def __init__(self, **stn_dict):
-        self.port = stn_dict.get('port', DEFAULT_PORT)
+        self.port_names = stn_dict.get('ports', [DEFAULT_PORT])
+        if isinstance(self.port_names, str):
+            self.port_names = [self.port_names]
 
-        self.polling_interval = float(stn_dict.get('polling_interval', 2))
+        self.baud = int(stn_dict.get('baud', 9600))
+
+        self.device_ids = stn_dict.get('devices', [1])
+        if isinstance(self.device_ids, str):
+            self.device_ids = [self.device_ids]
+
+        self.substitutions = SubstitutionManager()
+        for key in stn_dict:
+            if not key.startswith("substitute_"):
+                continue
+            keyn = key[len("substitute_"):]
+            id      = keyn[:2]
+            orig    = keyn[3:]
+            target  = stn_dict[key]
+            self.substitutions.add(id, orig, target)
+
+
+        self.polling_interval = float(stn_dict.get('polling_interval', 4))
         self.max_tries = int(stn_dict.get('max_tries', 5))
         self.retry_wait = int(stn_dict.get('retry_wait', 10))
         self.last_rain = None
         loginf('driver version is %s' % DRIVER_VERSION)
-        loginf('using serial port %s' % self.port)
+        loginf('using serial port %s' % self.port_names)
         loginf('polling interval is %s' % self.polling_interval)
         global DEBUG_READ
         DEBUG_READ = int(stn_dict.get('debug_read', DEBUG_READ))
@@ -89,57 +214,12 @@ class AWSDriver(weewx.drivers.AbstractDevice):
         self.last_read_time = time.time()
         self.read_counter = 0
 
+        self.timeout = 2 # changed from 60
+        self.device_mgr = AWSDeviceManager(self.port_names, self.device_ids, self.baud, self.timeout)
+        self.device_mgr.open_ports()
+        self.device_mgr.populate()
 
-        logdbg("Opening the Arduino on port %s" % self.port)
-
-        self.baudrate = 57600
-        self.timeout = 10 # changed from 60
-        self.serial_port = None
-
-        try:        
-            self.serial_port = serial.Serial(self.port, self.baudrate,
-                                             timeout=self.timeout)
-
-            self.serial_port.flush()
-
-            logdbg("Successfully opened the Arduino.")            
-
-        except Exception as e:
-            
-            logerr("Error opening the Arduino! %s" % e)
-            
-
-    def read_buffer(self):
-
-        # read the buffer
-        new_data = ""
-
-        try:
-            while True:
-                new_data = self.serial_port.readline()
-                if new_data is None:
-                    continue
-                new_data = new_data.decode("utf8")
-                new_data = new_data.replace("\n", "")
-                return new_data
-
-        except Exception as e:
-            return None
-
-    def parse_readings(self, b):
-        data = {}
         
-        try:
-            data = json.loads(b)
-            
-        except Exception as e:
-            logerr("Error parsing data: %s" % e)
-        
-        if DEBUG_READ:
-            logdbg(data)
-        
-        return data
-
     @property
     def hardware_name(self):
         return "AWS"
@@ -158,15 +238,15 @@ class AWSDriver(weewx.drivers.AbstractDevice):
                 packet = {'dateTime': int(time.time() + 0.5),
                           'usUnits': weewx.METRIC}
                 
-                serial_data = self.read_buffer() # read the buffer from the Arduino
-                data = self.parse_readings(serial_data) # parse the data
-                
-                packet.update(data) 
+                measurements = self.device_mgr.measure()
+                for id in measurements:
+                    val = measurements[id]
+                    val_sub = self.substitutions.substitute(id, val)
+                    packet.update(val_sub)
                 
                 self._augment_packet(packet)
                 
                 ntries = 0
-
 
                 '''
                 # print the time between reads and the count for debugging for now
