@@ -131,7 +131,7 @@ class AWSDeviceManager(object):
             for id in self.ids:
                 device = AWSDevice(port, id)
                 if device.probe():
-                    loginf('Found device id = %s' % id)
+                    loginf('Found device id = %s on port %s' % (id, port))
                     self.devices.append({"id" : id, "device" : device})
 
     def measure(self, nattempts=1):
