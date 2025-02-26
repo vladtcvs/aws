@@ -55,6 +55,9 @@ def logdbg(msg):
 def loginf(msg):
     logmsg(syslog.LOG_INFO, msg)
 
+def logwarn(msg):
+    logmsg(syslog.LOG_WARNING, msg)
+
 def logerr(msg):
     logmsg(syslog.LOG_ERR, msg)
 
@@ -120,9 +123,12 @@ class AWSDeviceManager(object):
     def open_ports(self):
         for port_name in self.port_names:
             loginf('opening port %s' % port_name)
-            port = serial.Serial(port_name, self.baud, timeout=self.timeout)
-            port.flush()
-            self.ports.append(port)
+            try:
+                port = serial.Serial(port_name, self.baud, timeout=self.timeout)
+                port.flush()
+                self.ports.append(port)
+            except Exception as e:
+                logwarn('unable to open port %s, skipping' % port_name)
         time.sleep(20)
         loginf('all ports opened')
 
@@ -167,8 +173,14 @@ class SubstitutionManager(object):
 class AWSDriver(weewx.drivers.AbstractDevice):
     """weewx driver that communicates with an Arduino weather station
     
-    port - serial port
+    ports - serial ports
     [Required. Default is /dev/ttyUSB0]
+    
+    baud - baudrate
+    [Required. Default is 9600]
+
+    devices - devices
+    [Required. Default is 01]
 
     polling_interval - how often to query the serial interface, seconds
     [Optional. Default is 2]
