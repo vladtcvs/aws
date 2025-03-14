@@ -120,25 +120,26 @@ class AWSDeviceManager(object):
         self.timeout = timeout
         self.baud = baud
 
-    def open_ports(self):
+    def populate(self):
         for port_name in self.port_names:
             loginf('opening port %s' % port_name)
             try:
                 port = serial.Serial(port_name, self.baud, timeout=self.timeout)
                 port.flush()
-                self.ports.append(port)
             except Exception as e:
                 logwarn('unable to open port %s, skipping' % port_name)
-        time.sleep(20)
-        loginf('all ports opened')
+                continue
 
-    def populate(self):
-        for port in self.ports:
+            time.sleep(20)
+            port_used = False
             for id in self.ids:
                 device = AWSDevice(port, id)
                 if device.probe():
                     loginf('Found device id = %s on port %s' % (id, port))
                     self.devices.append({"id" : id, "device" : device})
+                    port_used = True
+            if port_used:
+                self.ports.append(port)
 
     def measure(self, nattempts=1):
         responses = {}
@@ -228,7 +229,6 @@ class AWSDriver(weewx.drivers.AbstractDevice):
 
         self.timeout = 2 # changed from 60
         self.device_mgr = AWSDeviceManager(self.port_names, self.device_ids, self.baud, self.timeout)
-        self.device_mgr.open_ports()
         self.device_mgr.populate()
 
         
