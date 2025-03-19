@@ -70,10 +70,20 @@ class AWSDevice(object):
         cmd = "%s probe\n" % self.id
         for _ in range(nattempts):
             self.port.write(bytes(cmd, 'utf8'))
-            resp = self.port.readline()
+            time.sleep(1)
+            try:
+                resp = self.port.read(256)
+            except Exception as e:
+                logwarn("Can not read from port")
+                continue
             if resp is None:
                 continue
-            resp = resp.decode('utf8').strip()
+            try:
+                resp = resp.decode('utf8').strip()
+            except Exception as e:
+                logwarn("Can not read from port")
+                continue
+
             if resp == ("%s response probe" % self.id):
                 return True
         return False
@@ -122,7 +132,7 @@ class AWSDeviceManager(object):
 
     def populate(self):
         for port_name in self.port_names:
-            loginf('opening port %s' % port_name)
+            loginf('opening port %s, timeout=%0.2f' % (port_name, self.timeout))
             try:
                 port = serial.Serial(port_name, self.baud, timeout=self.timeout)
                 port.flush()
